@@ -1,0 +1,57 @@
+name: Build APK
+on:
+  workflow_dispatch:
+  push:
+    paths: ['**.zip', '.github/workflows/build-apk.yml']
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Unpack the source zip
+        run: |
+          Z=$(ls *.zip | head -n1)
+          echo "Using $Z"
+          mkdir src_unzipped && unzip -q "$Z" -d src_unzipped
+          M=$(find src_unzipped -name AndroidManifest.xml | head -n1)
+          echo "ROOT=$(dirname "$M")" >> "$GITHUB_ENV"
+
+      - name: Install SDK pieces
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" "build-tools;34.0.0"
+
+      - name: Build
+        run: |
+          set -e
+          BT="$ANDROID_HOME/build-tools/34.0.0"
+          JAR="$ANDROID_HOME/platforms/android-34/android.jar"
+          B="$PWD/build"; mkdir -p "$B/classes" "$B/dex"
+          cd "$ROOT"
+          "$BT/aapt2" compile --dir res -o "$B/res.zip"
+          "$BT/aapt2" link -o "$B/base.apk" -I "$JAR" --manifest AndroidManifest.xml \
+            --java "$B/gen" --min-sdk-version 30 --target-sdk-version 34 "$B/res.zip"
+          javac --release 8 -encoding UTF-8 -Xlint:-options -classpath "$JAR" -d "$B/classes" \
+            $(find src "$B/gen" -name '*.java')
+          "$BT/d8" --release --min-api 30 --lib "$JAR" --output "$B/dex" \
+            $(find "$B/classes" -name '*.class')
+          cd "$B/dex" && zip -q -j "$B/base.apk" classes.dex && cd "$B"
+          "$BT/zipalign" -f -p 4 base.apk aligned.apk
+          keytool -genkeypair -keystore release.jks -storetype PKCS12 -storepass wdrpass123 \
+            -alias displayreceiver -keyalg RSA -keysize 3072 -validity 10000 \
+            -dname "CN=Wireless Display Receiver"
+          "$BT/apksigner" sign --ks release.jks --ks-key-alias displayreceiver \
+            --ks-pass pass:wdrpass123 --out displayreceiver.apk aligned.apk
+          "$BT/apksigner" verify displayreceiver.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: displayreceiver-apk
+          path: build/displayreceiver.apk
